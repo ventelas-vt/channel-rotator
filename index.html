@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fire TV Channel Rotator</title>
+<style>
+  /* ---------- Fullscreen, black, zero-distraction ---------- */
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    cursor: none;               /* hide mouse pointer */
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    background: #000;
+  }
+  /* Both players fill the screen and sit on top of each other */
+  .player-slot {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .player-slot iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+  /* Black overlay used for the fade-through-black transition */
+  #fader {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--fade-ms, 600ms) ease-in-out;
+    z-index: 50;
+  }
+  #fader.on { opacity: 1; }
+
+  /* Small unobtrusive status chip (auto-hides). Toggle with the "i" key. */
+  #status {
+    position: fixed;
+    left: 16px;
+    bottom: 14px;
+    z-index: 100;
+    font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: rgba(255,255,255,0.55);
+    background: rgba(0,0,0,0.35);
+    padding: 4px 10px;
+    border-radius: 8px;
+    opacity: 0;
+    transition: opacity .4s ease;
+    pointer-events: none;
+    max-width: 60vw;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #status.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================= -->
+<!--  EDIT YOUR CHANNEL LIST HERE                                  -->
+<!--  Each entry: { id: "<YouTube video/live ID>", seconds: N }    -->
+<!--  You can paste a full URL in "url" instead of "id" if easier. -->
+<!-- ============================================================= -->
+<script>
+  const CHANNELS = [
+    // --- Replace these with your own live channels ---
+    { url: "https://www.youtube.com/watch?v=jfKfPfyJRdk", seconds: 60 },  // lofi girl (live)
+    { url: "https://www.youtube.com/watch?v=21X5lGlDOfg", seconds: 45 },  // nature live
+    { url: "https://www.youtube.com/watch?v=36YnV9STBqc", seconds: 90 },  // another live
+    // { id: "VIDEO_ID_ONLY", seconds: 30 },   // <- you can also just give the ID
+  ];
+
+  // ---------- Global behaviour ----------
+  const CONFIG = {
+    loopForever: true,     // loop the list endlessly
+    fadeMs: 700,           // fade-through-black duration (ms)
+    defaultSeconds: 60,    // used if an entry omits "seconds"
+    muted: false,          // set true if you want silent playback
+  };
+</script>
+<!-- ============================================================= -->
+<!--  No need to edit below this line.                              -->
+<!-- ============================================================= -->
+
+<div id="stage">
+  <div id="slotA" class="player-slot"></div>
+  <div id="slotB" class="player-slot"></div>
+</div>
+<div id="fader"></div>
+<div id="status"></div>
+
+<script>
+  // ---- Extract a YouTube video ID from a URL or raw ID ----
+  function toId(entry) {
+    if (entry.id) return entry.id.trim();
+    const u = (entry.url || "").trim();
+    // Common patterns: watch?v=, youtu.be/, /live/, /embed/
+    const m = u.match(/(?:v=|\/live\/|youtu\.be\/|\/embed\/)([A-Za-z0-9_-]{6,})/);
+    if (m) return m[1];
+    // Fallback: assume the whole string is an ID
+    return u;
+  }
+
+  const list = CHANNELS
+    .map(c => ({ id: toId(c), seconds: c.seconds || CONFIG.defaultSeconds }))
+    .filter(c => c.id);
+
+  document.documentElement.style.setProperty('--fade-ms', CONFIG.fadeMs + 'ms');
+
+  const faderEl = document.getElementById('fader');
+  const statusEl = document.getElementById('status');
+  let statusTimer = null;
+  function showStatus(text) {
+    statusEl.textContent = text;
+    statusEl.classList.add('show');
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => statusEl.classList.remove('show'), 2500);
+  }
+
+  // ---- YouTube IFrame API bootstrap ----
+  let players = { A: null, B: null };
+  let ready = { A: false, B: false };
+  let active = 'A';        // which slot is currently visible
+  let index = 0;           // index into list
+  let advanceTimer = null;
+  let apiReady = false;
+
+  function loadYT() {
+    const tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  }
+
+  window.onYouTubeIframeAPIReady = function () {
+    apiReady = true;
+    players.A = makePlayer('slotA', 'A');
+    players.B = makePlayer('slotB', 'B');
+  };
+
+  function makePlayer(elId, key) {
+    return new YT.Player(elId, {
+      width: '100%',
+      height: '100%',
+      videoId: '',
+      playerVars: {
+        autoplay: 1,
+        controls: 0,        // no player chrome — minimal distraction
+        disablekb: 1,
+        fs: 0,
+        modestbranding: 1,
+        rel: 0,
+        iv_load_policy: 3,  // hide annotations
+        playsinline: 1,
+      },
+      events: {
+        onReady: (e) => {
+          ready[key] = true;
+          if (CONFIG.muted) e.target.mute();
+          maybeStart();
+        },
+        onStateChange: (e) => onState(key, e),
+      }
+    });
+  }
+
+  // Once both players exist, start on slot A
+  function maybeStart() {
+    if (ready.A && ready.B && index === 0 && !advanceTimer) {
+      playIndexInSlot(0, 'A');
+    }
+  }
+
+  function slotEl(key) {
+    return document.getElementById(key === 'A' ? 'slotA' : 'slotB');
+  }
+
+  function setVisible(key) {
+    slotEl('A').style.zIndex = (key === 'A') ? 2 : 1;
+    slotEl('B').style.zIndex = (key === 'B') ? 2 : 1;
+    active = key;
+  }
+
+  // Load a given channel index into a given slot and play it
+  function playIndexInSlot(i, key) {
+    const item = list[i];
+    if (!item) return;
+    const p = players[key];
+    if (CONFIG.muted) p.mute(); else p.unMute();
+    p.loadVideoById(item.id);
+    setVisible(key);
+    scheduleAdvance(item.seconds);
+    showStatus(`Now playing ${i + 1}/${list.length} · ${item.seconds}s`);
+  }
+
+  function scheduleAdvance(seconds) {
+    clearTimeout(advanceTimer);
+    advanceTimer = setTimeout(goNext, Math.max(3, seconds) * 1000);
+  }
+
+  function nextIndex() {
+    let n = index + 1;
+    if (n >= list.length) {
+      if (!CONFIG.loopForever) return -1;
+      n = 0;
+    }
+    return n;
+  }
+
+  // The seamless transition: fade to black, swap slots, fade back up
+  function goNext() {
+    const n = nextIndex();
+    if (n < 0) { showStatus("Playlist finished."); return; }
+
+    const nextKey = (active === 'A') ? 'B' : 'A';
+    const nextPlayer = players[nextKey];
+
+    // Pre-load the next video in the hidden slot BEFORE fading,
+    // so when we fade back up it's already running.
+    const item = list[n];
+    if (CONFIG.muted) nextPlayer.mute(); else nextPlayer.unMute();
+    nextPlayer.loadVideoById(item.id);
+
+    // Fade to black
+    faderEl.classList.add('on');
+
+    setTimeout(() => {
+      // Bring the (now-loading) next slot to front, silence the old one
+      setVisible(nextKey);
+      const oldKey = (nextKey === 'A') ? 'B' : 'A';
+      try { players[oldKey].stopVideo(); } catch (e) {}
+
+      index = n;
+      // Fade back up
+      faderEl.classList.remove('on');
+      scheduleAdvance(item.seconds);
+      showStatus(`Now playing ${n + 1}/${list.length} · ${item.seconds}s`);
+    }, CONFIG.fadeMs);
+  }
+
+  function onState(key, e) {
+    // If a live stream ends or errors, skip ahead gracefully
+    if (key === active && e.data === YT.PlayerState.ENDED) {
+      goNext();
+    }
+  }
+
+  // ---- Remote / keyboard controls (optional, minimal) ----
+  document.addEventListener('keydown', (ev) => {
+    switch (ev.keyCode) {
+      case 39: // right arrow -> next
+        goNext();
+        break;
+      case 73: // "i" -> toggle status chip
+        statusEl.classList.toggle('show');
+        break;
+      case 13: // OK / Enter -> next
+        goNext();
+        break;
+    }
+  });
+
+  // Kick things off
+  if (list.length === 0) {
+    document.body.innerHTML =
+      '<div style="color:#fff;font:20px sans-serif;padding:40px">' +
+      'No channels configured. Edit the CHANNELS list at the top of this file.</div>';
+  } else {
+    loadYT();
+  }
+</script>
+</body>
+</html>
