@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Channel Rotator</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #stage { position: fixed; inset: 0; background: #000; }
+  .player {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: 0; pointer-events: none;      /* no controls / no clicking through */
+    opacity: 0; transition: opacity 0s;   /* fade handled via #fade overlay */
+  }
+  .player.active { opacity: 1; z-index: 2; }
+  .player.hidden { opacity: 0; z-index: 1; }
+  /* Black overlay we fade in/out for "fade through black" */
+  #fade {
+    position: fixed; inset: 0; background: #000; z-index: 5;
+    opacity: 0; pointer-events: none;
+    transition: opacity 600ms ease;
+  }
+  #fade.on { opacity: 1; }
+  /* status chip (toggle with 'i') */
+  #chip {
+    position: fixed; left: 16px; bottom: 16px; z-index: 6;
+    background: rgba(0,0,0,0.55); color: #fff; font-size: 14px;
+    padding: 6px 12px; border-radius: 20px; display: none;
+    letter-spacing: .3px;
+  }
+  #chip.show { display: block; }
+  /* on-screen channel label (shows briefly on each channel change) */
+  #label {
+    position: fixed; left: 0; right: 0; top: 40px; z-index: 6;
+    text-align: center; pointer-events: none;
+    opacity: 0; transition: opacity 500ms ease;
+  }
+  #label.show { opacity: 1; }
+  /* error / diagnostic banner */
+  #errbox {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 60px; z-index: 8;
+    background: rgba(150,20,20,0.9); color: #fff; font-size: 16px;
+    padding: 10px 18px; border-radius: 10px; max-width: 80%; text-align: center;
+    opacity: 0; transition: opacity 300ms ease; pointer-events: none;
+  }
+  #errbox.show { display: block; opacity: 1; }
+  #label span {
+    display: inline-block; background: rgba(0,0,0,0.55); color: #fff;
+    font-size: 26px; font-weight: 600; letter-spacing: .3px;
+    padding: 10px 22px; border-radius: 12px;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  }
+  /* hide cursor when idle */
+  body.hidecursor { cursor: none; }
+
+  /* ---------- Settings overlay ---------- */
+  #settings {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    background: rgba(0,0,0,0.88);
+    color: #eaeaea; overflow-y: auto;
+    padding: 32px 20px 64px;
+    box-sizing: border-box;
+  }
+  #settings.open { display: block; }
+  #settings .wrap { max-width: 720px; margin: 0 auto; }
+  #settings h1 { font-size: 22px; margin: 0 0 4px; }
+  #settings .sub { font-size: 13px; color: #9a9a9a; margin: 0 0 20px; }
+  .row {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 10px;
+  }
+  .row input[type=text] {
+    flex: 1; min-width: 0; background: #141414; color: #fff;
+    border: 1px solid #333; border-radius: 8px; padding: 12px 12px; font-size: 15px;
+  }
+  .row input.secs { flex: 0 0 80px; text-align: center; }
+  .row input.name { flex: 0 0 150px; }
+  .row .del {
+    flex: 0 0 auto; background: #3a1414; color: #ff8888; border: 1px solid #5c1f1f;
+    border-radius: 8px; padding: 12px 14px; font-size: 15px; cursor: pointer;
+  }
+  .btnbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  button.action {
+    background: #1f6feb; color: #fff; border: 0; border-radius: 8px;
+    padding: 13px 20px; font-size: 15px; cursor: pointer;
+  }
+  button.ghost { background: #222; color: #ddd; border: 1px solid #3a3a3a; }
+  button.big { font-size: 20px; padding: 18px 40px; background: #22a559; }
+  button.big:hover { background: #1e9450; }
+  button.warn  { background: #3a1414; color: #ff8888; border: 1px solid #5c1f1f; }
+  .hint { font-size: 12.5px; color: #8a8a8a; margin-top: 16px; line-height: 1.5; }
+  .cfgrow { display:flex; gap:16px; align-items:center; margin:14px 0; flex-wrap:wrap; font-size:14px;}
+  .cfgrow label { display:flex; gap:6px; align-items:center; }
+  .cfgrow input[type=number] { width:80px; background:#141414;color:#fff;border:1px solid #333;border-radius:6px;padding:8px;text-align:center;}
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="pA" class="player active"></div>
+    <div id="pB" class="player hidden"></div>
+  </div>
+  <div id="fade"></div>
+  <div id="chip">–</div>
+  <div id="label"><span></span></div>
+  <div id="errbox"></div>
+
+  <!-- ================= Settings overlay ================= -->
+  <div id="settings">
+    <div class="wrap">
+      <h1>▶ Channel Rotator</h1>
+      <p class="sub">Review your channels below, then press <b>Start Play</b>. Edited on this device only — saved privately in this browser, never uploaded.</p>
+
+      <div id="originwarn" style="display:none;background:#5a1a1a;color:#ffd;padding:12px 14px;border-radius:8px;margin-bottom:16px;font-size:13.5px;line-height:1.5;"></div>
+      <div id="rows"></div>
+
+      <div class="btnbar">
+        <button class="action ghost" id="addRow">+ Add channel</button>
+      </div>
+
+      <div class="cfgrow">
+        <label>Fade (ms) <input type="number" id="cfgFade" min="0" step="50"></label>
+        <label>Default seconds <input type="number" id="cfgDef" min="1"></label>
+        <label><input type="checkbox" id="cfgLoop"> Loop forever</label>
+        <label><input type="checkbox" id="cfgMuted"> Muted</label>
+        <label><input type="checkbox" id="cfgLabels"> Show labels</label>
+      </div>
+
+      <div class="btnbar">
+        <button class="action big" id="startBtn">▶ Start Play</button>
+      </div>
+      <div class="btnbar">
+        <button class="action ghost" id="saveBtn">Save changes</button>
+        <button class="action ghost" id="cancelBtn">Cancel</button>
+        <button class="action warn" id="resetBtn">Reset to samples</button>
+      </div>
+
+      <p class="hint">
+        Paste a full YouTube link (watch?v=…, youtu.be/…, /live/…, /embed/…) or just the video ID.<br>
+        <b>Open this panel anytime:</b> press <b>S</b> on a keyboard, or the <b>Menu / long-press OK</b> button on a TV remote.<br>
+        While playing: <b>→ / OK / Enter</b> = next channel &nbsp;·&nbsp; <b>i</b> = toggle status chip.
+      </p>
+    </div>
+  </div>
+
+<script>
+/* =======================================================================
+   CHANNEL ROTATOR  —  static list + private in-browser editor
+   Architecture preserved: TWO stacked players (A/B), fade-through-black,
+   pre-load NEXT channel in the hidden player before the fade begins.
+   Fire TV RAM constraint: only ONE visible + ONE pre-loading player ever.
+   ======================================================================= */
+
+/* ---- Preloaded SAMPLE channels (safe, embeddable 24/7 music/live) ---- */
+/* These ship with the app so it plays out-of-the-box. Replace via the ⚙️ panel. */
+const SAMPLE_CHANNELS = [
+  { name: "Gold/Silver", url: "https://www.youtube.com/watch?v=wJvRPbLvUig", seconds: 40 },
+  { name: "Major Futures", url: "https://www.youtube.com/watch?v=JkcBWb4slF8", seconds: 40 },
+  { name: "Currencies", url: "https://www.youtube.com/watch?v=afa2hZuA4JE", seconds: 40 },
+  { name: "Bitcoin", url: "https://www.youtube.com/watch?v=Zoq2XKS7N60", seconds: 40 },
+  { name: "Spacex", url: "https://www.youtube.com/watch?v=jIipvh8xWWI", seconds: 40 },
+  { name: "Tesla", url: "https://www.youtube.com/watch?v=q7s4tThfFBo", seconds: 40 },
+  { name: "Metals", url: "https://www.youtube.com/watch?v=oJIJXE4CdcE", seconds: 40 },
+  { name: "NaturalGas", url: "https://www.youtube.com/watch?v=yO87jeibrUU", seconds: 40 },
+  { name: "NQ&amp;YM", url: "https://www.youtube.com/watch?v=3cE-dqoiZt0", seconds: 40 },
+  { name: "Dowjones", url: "https://www.youtube.com/watch?v=MokZunk1oA8", seconds: 40 },
+  { name: "Stocks", url: "https://www.youtube.com/watch?v=4-qm6xO0GUc", seconds: 40 },
+  { name: "Energy", url: "https://www.youtube.com/watch?v=koi_Qf-pBJU", seconds: 40 },
+];
+
+const DEFAULT_CONFIG = {
+  loopForever: true,
+  fadeMs: 600,
+  defaultSeconds: 40,
+  muted: true,         // autoplay reliably requires muted on most browsers/TVs
+  showLabels: true     // show the channel name/number label on each change
+};
+
+const LS_CHANNELS = "cr.channels.v1";
+const LS_CONFIG   = "cr.config.v1";
+
+/* ---- Load persisted list/config, or fall back to samples ---- */
+function loadChannels() {
+  try {
+    const raw = localStorage.getItem(LS_CHANNELS);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length) return arr;
+    }
+  } catch (e) {}
+  return SAMPLE_CHANNELS.slice();
+}
+function loadConfig() {
+  try {
+    const raw = localStorage.getItem(LS_CONFIG);
+    if (raw) return Object.assign({}, DEFAULT_CONFIG, JSON.parse(raw));
+  } catch (e) {}
+  return Object.assign({}, DEFAULT_CONFIG);
+}
+function saveChannels(arr){ localStorage.setItem(LS_CHANNELS, JSON.stringify(arr)); }
+function saveConfig(cfg){ localStorage.setItem(LS_CONFIG, JSON.stringify(cfg)); }
+
+let CHANNELS = loadChannels();
+let CONFIG   = loadConfig();
+
+/* ---- Parse any YouTube URL / ID into a bare video ID ---- */
+function toVideoId(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  // already a bare ID (11 chars, no slashes/spaces)
+  if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
+  let m;
+  m = s.match(/[?&]v=([a-zA-Z0-9_-]{11})/);        if (m) return m[1];
+  m = s.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);    if (m) return m[1];
+  m = s.match(/\/live\/([a-zA-Z0-9_-]{11})/);       if (m) return m[1];
+  m = s.match(/\/embed\/([a-zA-Z0-9_-]{11})/);      if (m) return m[1];
+  m = s.match(/([a-zA-Z0-9_-]{11})/);               if (m) return m[1];
+  return null;
+}
+
+/* ======================= YouTube IFrame API ======================= */
+let ytReady = false;
+let playerA = null, playerB = null;
+let players = {};          // {A: playerA, B: playerB}
+let activeSlot = "A";      // which slot is currently visible
+let idx = 0;               // index into CHANNELS of the currently-playing channel
+let advanceTimer = null;
+let fading = false;
+
+window.onYouTubeIframeAPIReady = function () {
+  playerA = makePlayer("pA");
+  playerB = makePlayer("pB");
+  players = { A: playerA, B: playerB };
+};
+
+function makePlayer(elId) {
+  return new YT.Player(elId, {
+    width: "100%", height: "100%",
+    videoId: "",
+    host: "https://www.youtube-nocookie.com",
+    playerVars: {
+      autoplay: 1, controls: 0, disablekb: 1, fs: 0,
+      modestbranding: 1, rel: 0, iv_load_policy: 3,
+      playsinline: 1, enablejsapi: 1,
+      origin: location.origin,
+      mute: CONFIG.muted ? 1 : 0
+    },
+    events: {
+      onReady: onAnyReady,
+      onStateChange: onStateChange,
+      onError: onPlayerError
+    }
+  });
+}
+
+let readyCount = 0;
+let playRequested = false;   // becomes true when user clicks Start Play
+function onAnyReady() {
+  readyCount++;
+  if (readyCount === 2 && !ytReady) {
+    ytReady = true;
+    if (playRequested) startRotation();   // only auto-run if user already asked
+  }
+}
+
+/* ---- Auto-skip on stream end or error ---- */
+function onStateChange(e) {
+  // ENDED (0) — a live stream that ended, or a finite video finished
+  if (e.data === YT.PlayerState.ENDED) next();
+}
+const ERR_MSG = {
+  2:   "Invalid video ID",
+  5:   "HTML5 player error",
+  100: "Video removed or private",
+  101: "Embedding disabled by owner",
+  150: "Embedding disabled by owner"
+};
+function onPlayerError(e) {
+  const ch = CHANNELS[idx] || {};
+  const label = (ch.name || ("#" + (idx+1)));
+  const msg = ERR_MSG[e.data] || ("Error code " + e.data);
+  console.warn("Player error", e.data, "on", label, ch);
+  flagFailure(idx, e.data);
+  showError(label + ": " + msg + " — skipping…");
+  setTimeout(next, 1800);   // let the message show briefly before skipping
+}
+function showError(text) {
+  let el = document.getElementById("errbox");
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove("show"), 4000);
+}
+
+/* We collect failures so we can tell the user which channels didn't play. */
+const failures = [];
+function flagFailure(i, code) {
+  const ch = CHANNELS[i];
+  failures.push({ url: ch && ch.url, code });
+}
+
+/* ======================= Rotation core ======================= */
+function currentSeconds() {
+  const ch = CHANNELS[idx];
+  const s = ch && Number(ch.seconds);
+  return (s && s > 0) ? s : CONFIG.defaultSeconds;
+}
+
+function startRotation() {
+  document.getElementById("fade").style.transition = "opacity " + CONFIG.fadeMs + "ms ease";
+  idx = 0;
+  const first = players[activeSlot];
+  const vid = toVideoId(CHANNELS[idx].url || CHANNELS[idx].id);
+  if (!vid) { next(); return; }
+  first.loadVideoById(vid);
+  if (CONFIG.muted) first.mute();
+  showChipBrief();
+  showLabelBrief();
+  scheduleAdvance();
+}
+
+function scheduleAdvance() {
+  clearTimeout(advanceTimer);
+  advanceTimer = setTimeout(() => beginTransition(), currentSeconds() * 1000);
+}
+
+/* The seamless trick:
+   1. compute next index
+   2. load it into the HIDDEN player (pre-load, still behind black=off)
+   3. fade to black
+   4. swap active/hidden slots
+   5. fade back up — next stream is already running */
+function beginTransition() {
+  if (fading) return;
+  if (CHANNELS.length <= 1 && !CONFIG.loopForever) return;
+  fading = true;
+
+  const nextIdx = (idx + 1) % CHANNELS.length;
+  if (!CONFIG.loopForever && nextIdx === 0) { fading = false; return; }
+
+  const hiddenSlot = activeSlot === "A" ? "B" : "A";
+  const hiddenPlayer = players[hiddenSlot];
+  const vid = toVideoId(CHANNELS[nextIdx].url || CHANNELS[nextIdx].id);
+
+  if (!vid) { fading = false; idx = nextIdx; next(); return; }
+
+  // pre-load next in hidden player
+  hiddenPlayer.loadVideoById(vid);
+  if (CONFIG.muted) hiddenPlayer.mute();
+
+  const fade = document.getElementById("fade");
+  fade.classList.add("on");                    // fade to black
+
+  setTimeout(() => {
+    // swap slots
+    document.getElementById(activeSlot === "A" ? "pA" : "pB").classList.replace("active", "hidden");
+    document.getElementById(hiddenSlot === "A" ? "pA" : "pB").classList.replace("hidden", "active");
+    activeSlot = hiddenSlot;
+    idx = nextIdx;
+
+    fade.classList.remove("on");               // fade back up — next already playing
+    fading = false;
+    showChipBrief();
+  showLabelBrief();
+    scheduleAdvance();
+  }, CONFIG.fadeMs);
+}
+
+/* Manual "next" (remote OK / right arrow / Enter) */
+function next() {
+  clearTimeout(advanceTimer);
+  beginTransition();
+}
+
+/* ======================= Channel label ======================= */
+let labelTimer = null;
+function labelText() {
+  const ch = CHANNELS[idx];
+  const name = ch && (ch.name || "").trim();
+  return name ? name : ((idx + 1) + " / " + CHANNELS.length);
+}
+function showLabelBrief() {
+  if (!CONFIG.showLabels) return;
+  const el = document.getElementById("label");
+  el.querySelector("span").textContent = labelText();
+  el.classList.add("show");
+  clearTimeout(labelTimer);
+  labelTimer = setTimeout(() => el.classList.remove("show"), 3500);
+}
+
+/* ======================= Status chip ======================= */
+let chipTimer = null;
+function chipText() {
+  return (idx + 1) + " / " + CHANNELS.length;
+}
+function showChipBrief() {
+  const chip = document.getElementById("chip");
+  chip.textContent = chipText();
+  chip.classList.add("show");
+  clearTimeout(chipTimer);
+  chipTimer = setTimeout(() => chip.classList.remove("show"), 2500);
+}
+let chipPinned = false;
+function toggleChip() {
+  const chip = document.getElementById("chip");
+  chipPinned = !chipPinned;
+  if (chipPinned) { chip.textContent = chipText(); chip.classList.add("show"); clearTimeout(chipTimer); }
+  else { chip.classList.remove("show"); }
+}
+
+/* ======================= Input handling ======================= */
+document.addEventListener("keydown", (e) => {
+  if (document.getElementById("settings").classList.contains("open")) return; // panel open → ignore rotor keys
+  switch (e.key) {
+    case "ArrowRight": case "Enter": case "MediaPlayPause":
+      next(); break;
+    case "i": case "I":
+      toggleChip(); break;
+    case "s": case "S": case "ContextMenu":
+      openSettings(); break;
+    default: break;
+  }
+});
+
+/* Fire TV remote: OK button often maps to Enter; Menu → ContextMenu.
+   Long-press OK is hard to catch reliably across TVs, so 'S'/Menu opens settings. */
+
+/* hide cursor after idle (laptop) */
+let cursorTimer = null;
+function bumpCursor() {
+  document.body.classList.remove("hidecursor");
+  clearTimeout(cursorTimer);
+  cursorTimer = setTimeout(() => document.body.classList.add("hidecursor"), 2500);
+}
+document.addEventListener("mousemove", bumpCursor);
+bumpCursor();
+
+/* ======================= Settings panel ======================= */
+const rowsEl = document.getElementById("rows");
+
+function makeRowEl(url, secs, name) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const n = document.createElement("input");
+  n.type = "text"; n.className = "name"; n.placeholder = "Name (optional)"; n.value = name || "";
+  const u = document.createElement("input");
+  u.type = "text"; u.placeholder = "YouTube link or video ID"; u.value = url || "";
+  const s = document.createElement("input");
+  s.type = "text"; s.className = "secs"; s.placeholder = "secs"; s.value = secs || "";
+  s.inputMode = "numeric";
+  const d = document.createElement("button");
+  d.className = "del"; d.textContent = "✕";
+  d.onclick = () => row.remove();
+  row.append(n, u, s, d);
+  return row;
+}
+
+function renderRows(list) {
+  rowsEl.innerHTML = "";
+  (list && list.length ? list : [{}]).forEach(ch => {
+    rowsEl.appendChild(makeRowEl(ch.url || ch.id || "", ch.seconds || "", ch.name || ""));
+  });
+}
+
+function openSettings() {
+  renderRows(CHANNELS);
+  // Origin diagnostic — YouTube embeds need an https:// page.
+  const ow = document.getElementById("originwarn");
+  const proto = location.protocol;
+  if (proto === "file:") {
+    ow.style.display = "block";
+    ow.innerHTML = "⚠️ You opened this file directly (file://). YouTube will NOT play this way — you'll see blank players. Host it at an <b>https://</b> URL (e.g. GitHub Pages) and open that link instead.";
+  } else if (proto === "http:") {
+    ow.style.display = "block";
+    ow.innerHTML = "⚠️ This page is served over http:// — YouTube embeds may refuse to load. Use an <b>https://</b> URL.";
+  } else {
+    ow.style.display = "none";
+  }
+  document.getElementById("cfgFade").value  = CONFIG.fadeMs;
+  document.getElementById("cfgDef").value   = CONFIG.defaultSeconds;
+  document.getElementById("cfgLoop").checked  = CONFIG.loopForever;
+  document.getElementById("cfgMuted").checked = CONFIG.muted;
+  document.getElementById("cfgLabels").checked = CONFIG.showLabels;
+  document.getElementById("settings").classList.add("open");
+  clearTimeout(advanceTimer);                 // pause rotation while editing
+}
+
+function closeSettings() {
+  document.getElementById("settings").classList.remove("open");
+}
+
+function collectRows() {
+  const out = [];
+  rowsEl.querySelectorAll(".row").forEach(row => {
+    const [n, u, s] = row.querySelectorAll("input");
+    const url = u.value.trim();
+    if (!url) return;
+    const secs = parseInt(s.value, 10);
+    const name = n.value.trim();
+    out.push({ name, url, seconds: (secs && secs > 0) ? secs : CONFIG.defaultSeconds });
+  });
+  return out;
+}
+
+document.getElementById("addRow").onclick = () => rowsEl.appendChild(makeRowEl("", "", ""));
+
+/* Read panel -> CHANNELS/CONFIG, persist. Returns valid channel list or null. */
+function commitEdits(requireChannels) {
+  const list = collectRows();
+  if (requireChannels && !list.length) { alert("Add at least one channel."); return null; }
+  const bad = list.filter(ch => !toVideoId(ch.url));
+  if (bad.length) {
+    if (!confirm(bad.length + " entr" + (bad.length>1?"ies don't":"y doesn't") +
+                 " look like a valid YouTube link/ID and will be skipped. Continue?")) return null;
+  }
+  CONFIG = {
+    loopForever: document.getElementById("cfgLoop").checked,
+    muted: document.getElementById("cfgMuted").checked,
+    showLabels: document.getElementById("cfgLabels").checked,
+    fadeMs: Math.max(0, parseInt(document.getElementById("cfgFade").value, 10) || DEFAULT_CONFIG.fadeMs),
+    defaultSeconds: Math.max(1, parseInt(document.getElementById("cfgDef").value, 10) || DEFAULT_CONFIG.defaultSeconds)
+  };
+  CHANNELS = list.filter(ch => toVideoId(ch.url));
+  saveChannels(CHANNELS);
+  saveConfig(CONFIG);
+  return CHANNELS;
+}
+
+document.getElementById("saveBtn").onclick = () => {
+  const list = commitEdits(true);
+  if (!list) return;
+  // If we're already playing, apply the new list live; otherwise just keep the start screen up.
+  if (playRequested && ytReady) {
+    closeSettings();
+    fading = false;
+    restartRotation();
+  } else {
+    alert("Saved. Press Start Play when ready.");
+  }
+};
+document.getElementById("startBtn").onclick = () => {
+  const list = commitEdits(true);
+  if (!list) return;
+  playRequested = true;
+  closeSettings();
+  fading = false;
+  if (ytReady) { restartRotation(); }
+  // if API not ready yet, onAnyReady() will call startRotation() because playRequested is true
+};
+
+document.getElementById("cancelBtn").onclick = () => {
+  if (!playRequested) return;   // on the start screen there's nothing to resume
+  closeSettings();
+  scheduleAdvance();            // resume where we were
+};
+
+document.getElementById("resetBtn").onclick = () => {
+  if (!confirm("Reset the channel list back to the built-in samples on THIS device?")) return;
+  CHANNELS = SAMPLE_CHANNELS.slice();
+  CONFIG = Object.assign({}, DEFAULT_CONFIG);
+  saveChannels(CHANNELS);
+  saveConfig(CONFIG);
+  renderRows(CHANNELS);
+  document.getElementById("cfgFade").value  = CONFIG.fadeMs;
+  document.getElementById("cfgDef").value   = CONFIG.defaultSeconds;
+  document.getElementById("cfgLoop").checked  = CONFIG.loopForever;
+  document.getElementById("cfgMuted").checked = CONFIG.muted;
+  document.getElementById("cfgLabels").checked = CONFIG.showLabels;
+};
+
+/* Restart rotation after an edit — reset slots to a clean state */
+function restartRotation() {
+  clearTimeout(advanceTimer);
+  activeSlot = "A"; idx = 0;
+  document.getElementById("pA").classList.replace("hidden", "active");
+  document.getElementById("pB").classList.replace("active", "hidden");
+  document.getElementById("pA").className = "player active";
+  document.getElementById("pB").className = "player hidden";
+  const vid = toVideoId(CHANNELS[0].url);
+  if (vid) {
+    playerA.loadVideoById(vid);
+    if (CONFIG.muted) playerA.mute();
+  }
+  showChipBrief();
+  showLabelBrief();
+  scheduleAdvance();
+}
+
+/* ======================= Boot ======================= */
+(function loadYT(){
+  const tag = document.createElement("script");
+  tag.src = "https://www.youtube.com/iframe_api";
+  document.head.appendChild(tag);
+})();
+
+/* If no channels are configured at all, open settings on load */
+// Always show the start screen first; playback waits for Start Play.
+window.addEventListener("load", openSettings);
+</script>
+</body>
+</html>
